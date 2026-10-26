@@ -1,5 +1,5 @@
 // Sarvam Vision (Document Intelligence "digitise"): reads old recipe diaries, including
-// handwriting, into Markdown. The app shows the raw result so the family can check it first.
+// handwriting, into text. The app shows the raw result so the family can check it first.
 
 import { handle, HttpError, sarvam } from "@/lib/server/sarvam";
 
@@ -33,10 +33,21 @@ export const GET = handle(async (req) => {
     return Response.json({ status: status.status });
   }
 
-  const results = (await s.docAi.getResults(jobId, { format: "md" })) as {
-    documents?: { pages?: { page_number?: number; content?: string }[] }[];
+  // JSON is the one format every job can serve ("md" is refused when a job produced HTML, and
+  // "html" arrives as a zip). Each page holds text blocks with a reading order.
+  const results = (await s.docAi.getResults(jobId, { format: "json" })) as unknown as {
+    documents?: { pages?: { blocks?: { text?: string; layout_tag?: string; reading_order?: number }[] }[] }[];
   };
   const pages = (results.documents ?? []).flatMap((d) => d.pages ?? []);
-  const markdown = pages.map((p) => p.content ?? "").join("\n\n").trim();
-  return Response.json({ status: status.status, markdown, pages: pages.length });
+  const text = pages
+    .map((page) =>
+      [...(page.blocks ?? [])]
+        .sort((a, b) => (a.reading_order ?? 0) - (b.reading_order ?? 0))
+        .map((b) => (b.layout_tag?.includes("title") ? `## ${b.text ?? ""}` : (b.text ?? "")))
+        .filter((line) => line.replace(/^## /, "").trim())
+        .join("\n"),
+    )
+    .join("\n\n")
+    .trim();
+  return Response.json({ status: status.status, markdown: text, pages: pages.length });
 });
