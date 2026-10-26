@@ -14,8 +14,18 @@ export class HttpError extends Error {
 
 let client: SarvamAIClient | null = null;
 
+/** The configured key, tolerating a pasted "SARVAM_API_KEY=" prefix, quotes or stray whitespace. */
+export function apiKey(): string | null {
+  const key = (process.env.SARVAM_API_KEY ?? "")
+    .trim()
+    .replace(/^SARVAM_API_KEY\s*=\s*/i, "")
+    .replace(/^["']|["']$/g, "")
+    .trim();
+  return key || null;
+}
+
 export function sarvam(): SarvamAIClient {
-  const key = process.env.SARVAM_API_KEY;
+  const key = apiKey();
   if (!key) throw new HttpError(500, "SARVAM_API_KEY is not set on the server.");
   client ??= new SarvamAIClient({ apiSubscriptionKey: key, timeoutInSeconds: 120, maxRetries: 1 });
   return client;
