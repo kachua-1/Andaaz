@@ -492,6 +492,18 @@ video {
     box-shadow: 0 0 0 16px color-mix(in srgb, var(--danger) 0%, transparent);
   }
 }
+.meter {
+  width: min(260px, 80vw);
+  height: 10px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.meter > div {
+  height: 100%;
+  background: var(--leaf);
+  transition: width 0.1s linear;
+}
 .rec-dot {
   display: inline-block;
   width: 10px;

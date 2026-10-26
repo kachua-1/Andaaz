@@ -66,7 +66,8 @@ Open http://localhost:3000. To look around without spending credits, use **Try a
 
 ## Prototype limits (honest notes)
 
-- **Recordings over ~4 MB can't be uploaded.** Sarvam's batch storage doesn't accept direct uploads from browsers, so files go through the server, and Vercel caps request bodies at ~4.5 MB. That's about 15 minutes of in-app recording, or about 4 minutes of a 128 kbps MP3.
+- **Recordings are converted in the browser before upload.** Sarvam's batch API can't read the WebM audio browsers record, and its storage doesn't accept direct browser uploads. So every recording becomes 16 kHz mono WAV in 2-minute parts (~3.8 MB each, under Vercel's ~4.5 MB request limit), sent through the server in one batch job. Very long videos may be slow to convert on phones.
+- **Speakers are labelled per 2-minute part.** In long recordings, the person who talks most in each part is taken as the elder.
 - **Recipes live in the browser that recorded them.** Sharing across the family needs a backend (for example Vercel Blob plus Postgres) as a next step.
 - **Diarization is best when voices differ.** If it mixes up who is speaking, use "Which voice is Dadi?" under the transcript to fix the clips.
 - **Handwriting.** Sarvam Vision reads handwritten pages, but quality varies by hand. The app shows what it read and lets you correct it before decoding. Test it on your own diaries before promising this.

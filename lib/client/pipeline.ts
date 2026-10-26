@@ -4,7 +4,7 @@
 import { guessElderSpeaker, withClips } from "@/lib/recipe";
 import type { Recipe, Segment } from "@/lib/types";
 import { getJson, poll, postForm, postJson } from "./api";
-import { extensionFor } from "./audio";
+import { toWavChunks } from "./audio";
 import { newId, saveMedia, saveRecipe } from "./store";
 
 type Stage = (label: string) => void;
@@ -12,48 +12,67 @@ type Stage = (label: string) => void;
 interface BatchResult {
   state: string;
   error?: string;
-  transcript?: string;
   language?: string | null;
-  segments?: Segment[];
+  files?: Record<string, Segment[]>;
 }
 
-// Sarvam's job storage doesn't allow direct browser uploads (no CORS), so recordings go through
-// our server route, and Vercel caps request bodies at ~4.5 MB.
-const SERVER_UPLOAD_LIMIT = 4_300_000;
+// Sarvam's batch API can't read the WebM/MP4 audio browsers record, so every recording is
+// converted to 16 kHz mono WAV (what Sarvam recommends). Parts are 2 minutes (~3.8 MB), small
+// enough to pass through our server route under Vercel's ~4.5 MB request limit.
+const PART_SECONDS = 120;
 
 export async function transcribeRecording(
   blob: Blob,
   opts: { language: string; speakers: number; onStage: Stage },
 ): Promise<{ segments: Segment[]; language: string | null }> {
-  if (blob.size > SERVER_UPLOAD_LIMIT) {
-    throw new Error(
-      "This recording is over 4 MB, the upload limit for now. In-app recordings fit about 15 minutes; for MP3s, trim to about 4 minutes.",
-    );
+  opts.onStage("Preparing the audio");
+  let parts: Blob[];
+  try {
+    parts = await toWavChunks(blob, PART_SECONDS);
+  } catch {
+    throw new Error("This browser couldn't read that file's audio. Try an MP3, WAV or M4A recording.");
   }
+  if (!parts.length) throw new Error("This recording has no audio Andaaz can hear.");
+  const names = parts.map((_, i) => `part-${String(i).padStart(3, "0")}.wav`);
+
   opts.onStage("Creating a Saaras v3 batch job");
-  const created = await postJson<{ jobId: string; fileName: string }>("/api/batch", {
+  const { jobId } = await postJson<{ jobId: string }>("/api/batch", {
     action: "create",
-    fileName: `recording.${extensionFor(blob.type)}`,
+    files: names,
     language: opts.language,
     speakers: opts.speakers,
   });
 
-  opts.onStage("Uploading the recording to Sarvam");
-  const form = new FormData();
-  form.append("jobId", created.jobId);
-  form.append("fileName", created.fileName);
-  form.append("file", blob, created.fileName);
-  await postForm("/api/batch", form);
+  opts.onStage(parts.length > 1 ? `Uploading ${parts.length} parts to Sarvam` : "Uploading the recording to Sarvam");
+  for (const [i, part] of parts.entries()) {
+    const form = new FormData();
+    form.append("jobId", jobId);
+    form.append("fileName", names[i]);
+    form.append("file", part, names[i]);
+    await postForm("/api/batch", form);
+  }
 
-  await postJson("/api/batch", { action: "start", jobId: created.jobId });
+  await postJson("/api/batch", { action: "start", jobId });
   opts.onStage("Saaras v3 is listening: separating voices and timestamping");
   const result = await poll(
-    () => getJson<BatchResult>(`/api/batch?jobId=${encodeURIComponent(created.jobId)}`),
+    () => getJson<BatchResult>(`/api/batch?jobId=${encodeURIComponent(jobId)}`),
     (r) => r.state === "Completed" || r.state === "Failed",
     { intervalMs: 4000 },
   );
   if (result.state === "Failed") throw new Error(result.error || "Transcription failed.");
-  return { segments: result.segments ?? [], language: result.language ?? null };
+
+  // Each part is diarized separately, so speaker numbers don't match across parts: label the
+  // elder within each part ("0", everyone else "1"), then shift times onto one timeline.
+  const segments: Segment[] = [];
+  names.forEach((name, i) => {
+    const partSegments = result.files?.[name] ?? [];
+    const elder = guessElderSpeaker(partSegments);
+    const offset = i * PART_SECONDS;
+    for (const s of partSegments) {
+      segments.push({ ...s, speaker: s.speaker === elder ? "0" : "1", start: s.start + offset, end: s.end + offset });
+    }
+  });
+  return { segments, language: result.language ?? null };
 }
 
 type Decoded = Pick<

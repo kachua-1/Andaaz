@@ -6,15 +6,6 @@ export function pickMimeType(): string {
   return candidates.find((t) => MediaRecorder.isTypeSupported(t)) ?? "";
 }
 
-export function extensionFor(type: string): string {
-  if (type.includes("mp4") || type.includes("m4a") || type.includes("aac")) return type.startsWith("video") ? "mp4" : "m4a";
-  if (type.includes("ogg")) return "ogg";
-  if (type.includes("wav")) return "wav";
-  if (type.includes("mpeg") || type.includes("mp3")) return "mp3";
-  if (type.includes("flac")) return "flac";
-  return "webm";
-}
-
 /** Thin wrapper over MediaRecorder; low bitrate keeps long sessions small enough to upload. */
 export class Recorder {
   private rec: MediaRecorder;
@@ -151,6 +142,68 @@ export class ClipPlayer {
     this.stop();
     void this.ctx.close();
   }
+}
+
+/**
+ * Watches a microphone stream's loudness: reports a 0–1 level, notices when someone starts
+ * talking, and when they've gone quiet again (or never spoke). Returns a stop function.
+ * Pass an AudioContext created during a click, or browsers may keep it suspended (silent).
+ */
+export function watchVoice(
+  ctx: AudioContext,
+  stream: MediaStream,
+  opts: {
+    onLevel?: (level: number) => void;
+    onSpeech?: () => void;
+    onSilence?: () => void;
+    onNoSpeech?: () => void;
+    silenceMs?: number;
+    noSpeechMs?: number;
+  },
+): () => void {
+  void ctx.resume();
+  const source = ctx.createMediaStreamSource(stream);
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 1024;
+  source.connect(analyser);
+  const buf = new Float32Array(analyser.fftSize);
+  const startedAt = performance.now();
+  let quietSince = startedAt;
+  let heard = false;
+  let floor = 0.005;
+  let stopped = false;
+
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    clearInterval(timer);
+    source.disconnect();
+  };
+  const timer = setInterval(() => {
+    analyser.getFloatTimeDomainData(buf);
+    let sum = 0;
+    for (const v of buf) sum += v * v;
+    const rms = Math.sqrt(sum / buf.length);
+    opts.onLevel?.(Math.min(1, rms * 10));
+    // Speech is well above the room's background level, which we track while it's quiet.
+    const loud = rms > Math.max(0.015, floor * 3);
+    if (!loud) floor = floor * 0.95 + rms * 0.05;
+    const now = performance.now();
+    if (loud) {
+      quietSince = now;
+      if (!heard) {
+        heard = true;
+        opts.onSpeech?.();
+      }
+    } else if (heard && now - quietSince > (opts.silenceMs ?? 2200)) {
+      stop();
+      opts.onSilence?.();
+    } else if (!heard && now - startedAt > (opts.noSpeechMs ?? 15000)) {
+      stop();
+      opts.onNoSpeech?.();
+    }
+  }, 100);
+  return stop;
 }
 
 let speaking: HTMLAudioElement | null = null;

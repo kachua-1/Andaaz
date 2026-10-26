@@ -3,7 +3,7 @@
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useRef, useState } from "react";
 import { getJson, poll, postForAudio, postForm, postJson } from "@/lib/client/api";
-import { playBlob, Recorder, stopSpeaking, toWavChunks } from "@/lib/client/audio";
+import { playBlob, Recorder, stopSpeaking, toWavChunks, watchVoice } from "@/lib/client/audio";
 import { decodeRecipe, recipeFromRecording } from "@/lib/client/pipeline";
 import { DEFAULT_SETTINGS, loadSettings, type Settings } from "@/lib/client/settings";
 import { newId, saveMedia, saveRecipe } from "@/lib/client/store";
@@ -149,15 +149,23 @@ function Interview(p: Common) {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [phase, setPhase] = useState<Phase>("idle");
   const [elapsed, setElapsed] = useState(0);
+  const [level, setLevel] = useState(0);
+  const [voiceHeard, setVoiceHeard] = useState(false);
   const turnsRef = useRef<Turn[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
   const sessionRef = useRef<Recorder | null>(null);
   const answerRef = useRef<Recorder | null>(null);
+  const audioCtx = useRef<AudioContext | null>(null);
+  const stopWatching = useRef<(() => void) | null>(null);
   const questionAudio = useRef<Blob | null>(null);
   const startedAt = useRef(0);
   const chatEnd = useRef<HTMLDivElement | null>(null);
 
-  useEffect(() => chatEnd.current?.scrollIntoView({ block: "nearest" }), [turns]);
+  // Braces matter: newer browsers return a Promise from scrollIntoView, and React would try
+  // to call it as this effect's cleanup.
+  useEffect(() => {
+    chatEnd.current?.scrollIntoView({ block: "nearest" });
+  }, [turns]);
 
   useEffect(() => {
     if (phase === "idle") return;
@@ -168,7 +176,9 @@ function Interview(p: Common) {
   useEffect(
     () => () => {
       stopSpeaking();
+      stopWatching.current?.();
       streamRef.current?.getTracks().forEach((t) => t.stop());
+      void audioCtx.current?.close();
     },
     [],
   );
@@ -180,6 +190,9 @@ function Interview(p: Common) {
 
   async function start() {
     p.onError("");
+    // Created during the click so the browser lets it run; used to listen for the answers.
+    audioCtx.current ??= new AudioContext();
+    void audioCtx.current.resume();
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true },
@@ -223,7 +236,8 @@ function Interview(p: Common) {
           questionAudio.current = null; // the question is still shown as text
         }
       }
-      setPhase(done ? "complete" : "waiting");
+      if (done) setPhase("complete");
+      else startAnswer(); // listen straight away, hands-free
     } catch (e) {
       p.onError(message(e));
       setPhase("waiting");
@@ -231,25 +245,50 @@ function Interview(p: Common) {
   }
 
   function startAnswer() {
-    if (!streamRef.current) return;
+    if (!streamRef.current || answerRef.current) return;
     stopSpeaking();
     p.onError("");
+    setVoiceHeard(false);
+    setLevel(0);
     answerRef.current = new Recorder(streamRef.current);
     answerRef.current.start();
     setPhase("recording");
+    if (audioCtx.current) {
+      stopWatching.current = watchVoice(audioCtx.current, streamRef.current, {
+        onLevel: setLevel,
+        onSpeech: () => setVoiceHeard(true),
+        onSilence: () => void stopAnswer(),
+        onNoSpeech: () => void cancelAnswer(),
+      });
+    }
+  }
+
+  /** Nobody spoke: drop the empty recording and wait for a tap instead. */
+  async function cancelAnswer() {
+    stopWatching.current?.();
+    const rec = answerRef.current;
+    answerRef.current = null;
+    await rec?.stop();
+    p.onError(
+      `Andaaz didn't hear anything. Check the green mic bar moves when ${p.elderName} talks (the right microphone is chosen and not muted), then tap the mic to answer.`,
+    );
+    setPhase("waiting");
   }
 
   async function stopAnswer() {
-    const blob = await answerRef.current?.stop();
+    stopWatching.current?.();
+    const rec = answerRef.current;
     answerRef.current = null;
-    if (!blob) return;
+    if (!rec) return;
+    const blob = await rec.stop();
     setPhase("transcribing");
     try {
       const texts: string[] = [];
       for (const chunk of await toWavChunks(blob)) {
         const form = new FormData();
         form.append("file", chunk, "answer.wav");
-        form.append("language", p.language);
+        // Auto-detect, so a wrong language setting (or mixing languages) still transcribes.
+        form.append("language", "unknown");
         const r = await postForm<{ transcript: string }>("/api/stt", form);
         if (r.transcript?.trim()) texts.push(r.transcript.trim());
       }
@@ -269,7 +308,9 @@ function Interview(p: Common) {
 
   async function finish() {
     stopSpeaking();
+    stopWatching.current?.();
     if (answerRef.current) await answerRef.current.stop();
+    answerRef.current = null;
     const media = await sessionRef.current?.stop();
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
@@ -360,7 +401,7 @@ function Interview(p: Common) {
               )}
               <button className="mic" onClick={startAnswer} disabled={p.busy}>
                 <span className="icon">🎙️</span>
-                Tap while {p.elderName} answers
+                Tap to answer
               </button>
               <div className="actions" style={{ justifyContent: "center" }}>
                 {questionAudio.current && (
@@ -375,10 +416,20 @@ function Interview(p: Common) {
             </>
           )}
           {phase === "recording" && (
-            <button className="mic live" onClick={stopAnswer}>
-              <span className="icon">■</span>
-              Done answering
-            </button>
+            <>
+              <p className="small" style={{ margin: 0 }}>
+                {voiceHeard
+                  ? `Listening to ${p.elderName}… stops by itself after a pause.`
+                  : `Listening… ${p.elderName} can answer now.`}
+              </p>
+              <div className="meter" aria-label="Microphone level">
+                <div style={{ width: `${Math.round(level * 100)}%` }} />
+              </div>
+              <button className="mic live" onClick={() => void stopAnswer()}>
+                <span className="icon">■</span>
+                Done answering
+              </button>
+            </>
           )}
           {phase === "transcribing" && (
             <p className="muted">
@@ -398,7 +449,10 @@ function Upload(p: Common) {
   const [preview, setPreview] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!file) return setPreview(null);
+    if (!file) {
+      setPreview(null);
+      return;
+    }
     const url = URL.createObjectURL(file);
     setPreview(url);
     return () => URL.revokeObjectURL(url);
@@ -471,7 +525,10 @@ function Diary(p: Common) {
   const [preview, setPreview] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!file || !file.type.startsWith("image")) return setPreview(null);
+    if (!file || !file.type.startsWith("image")) {
+      setPreview(null);
+      return;
+    }
     const url = URL.createObjectURL(file);
     setPreview(url);
     return () => URL.revokeObjectURL(url);
