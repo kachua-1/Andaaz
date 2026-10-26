@@ -63,6 +63,8 @@ INGREDIENTS
 SENSORY CUES
 - "cues" lists every checkpoint the elder describes for knowing something is ready or right, by colour, smell, sound, texture, taste or a test. quote is copied word for word from the source, in the original script; cue is its meaning in plain English.
 - Cues ARE phrases like: "जब तक रंग हल्का गुलाबी ना हो जाए" (until it turns light pink), "खुशबू आने लगे" (until it smells fragrant), "एक टुकड़ा डालो तो धीरे धीरे ऊपर आए" (a piece of dough rises slowly: the oil is ready), "जब तक तेल छोड़ने न लगे" (until the oil separates).
+- Also cues: how something should feel ("इतना कि हाथ लगा सको", warm enough to touch) and what to watch for ("अगर बिखरे", if it crumbles).
+- When the elder gives several signs for the same moment (smell, colour, ghee separating), make ONE cue entry that combines them, quoting all of those words.
 - Cues are NOT plain instructions ("फिर चीनी मिलाओ"), amounts, or anything you infer from general cooking knowledge. If the elder gave no cue, the list can be empty.
 
 STEPS
@@ -81,8 +83,9 @@ Reply with JSON only, exactly this shape:
   const raw = parseModelJson<Record<string, unknown>>(
     await chat({ system, user, json: true, maxTokens: 7000, temperature: 0.2 }),
   );
-  const source = body.source === "diary" ? (body.text ?? "") : (body.segments ?? []).map((s) => s.text).join(" ");
-  return Response.json(normalise(raw, { segmentCount: body.segments?.length ?? 0, source, katoriMl }));
+  const segments = body.source === "diary" ? [] : (body.segments ?? []);
+  const source = body.source === "diary" ? (body.text ?? "") : segments.map((s) => s.text).join(" ");
+  return Response.json(normalise(raw, { segments, source, katoriMl }));
 });
 
 // Grams per ml for common ingredients measured by katori; liquids stay in ml. Order matters.
@@ -144,24 +147,48 @@ function householdAmount(q: string): { min: number; max: number; unit: string } 
 const FUZZY_MEASURE =
   /katori|mutth?i|chutki|thoda|chamm?ach|glass|andaa?z|pinch|handful|bowl|cup|कटोरी|मुट्ठी|चुटकी|थोड़ा|थोड़ी|चम्मच|गिलास|अंदाज़?|कप|प्याला/i;
 
+const words = (s: string) => s.toLowerCase().split(/[\s\p{P}]+/u).filter((w) => w.length > 1);
+
+/** Share of the quote's words that occur in `text`. */
+function overlap(quote: string, text: string): number {
+  const q = words(quote);
+  if (q.length < 2) return 0;
+  const t = new Set(words(text));
+  return q.filter((w) => t.has(w)).length / q.length;
+}
+
 /** True when most words of `quote` really occur in the source, i.e. the elder said it. */
 function grounded(quote: string, source: string): boolean {
-  const words = (s: string) => s.toLowerCase().split(/[\s\p{P}]+/u).filter((w) => w.length > 1);
-  const q = words(quote);
-  if (q.length < 2) return false;
-  const src = new Set(words(source));
-  return q.filter((w) => src.has(w)).length / q.length >= 0.7;
+  return overlap(quote, source) >= 0.6;
+}
+
+/**
+ * The transcript line that contains the elder's quote. Models miscount line numbers, so the
+ * clip for each step is found by the words she actually said.
+ */
+function lineOf(quote: string, segments: Segment[]): number | null {
+  let best: number | null = null;
+  let score = 0.5;
+  segments.forEach((s, i) => {
+    const o = overlap(quote, s.text);
+    if (o > score) [best, score] = [i, o];
+  });
+  return best;
 }
 
 // Models occasionally drift from the schema; coerce everything into the shape the app expects.
-function normalise(r: Record<string, unknown>, ctx: { segmentCount: number; source: string; katoriMl: number }) {
+function normalise(r: Record<string, unknown>, ctx: { segments: Segment[]; source: string; katoriMl: number }) {
   const str = (v: unknown) => (typeof v === "string" ? v.trim() : v == null ? "" : String(v));
   const strOrNull = (v: unknown) => (str(v) && str(v).toLowerCase() !== "null" ? str(v) : null);
   const num = (v: unknown) =>
     typeof v === "number" && Number.isFinite(v) ? v : v !== null && v !== "" && Number.isFinite(Number(v)) ? Number(v) : null;
   const list = (v: unknown) => (Array.isArray(v) ? v.map(str).filter(Boolean) : []);
   const indices = (v: unknown) =>
-    Array.isArray(v) ? v.map(Number).filter((n) => Number.isInteger(n) && n >= 0 && n < ctx.segmentCount) : [];
+    Array.isArray(v) ? v.map(Number).filter((n) => Number.isInteger(n) && n >= 0 && n < ctx.segments.length) : [];
+  const linesFor = (quote: unknown, fallback: unknown) => {
+    const line = lineOf(str(quote), ctx.segments);
+    return line != null ? [line] : indices(fallback);
+  };
   const objects = (v: unknown) => (Array.isArray(v) ? v.map((x) => (x ?? {}) as Record<string, unknown>) : []);
 
   const ingredients: Ingredient[] = objects(r.ingredients).map((i) => {
@@ -213,7 +240,7 @@ function normalise(r: Record<string, unknown>, ctx: { segmentCount: number; sour
       sensoryCue: cue?.cue ?? "",
       cueSense: cue?.sense ?? "sight",
       timerSeconds: timer && timer > 0 ? Math.round(timer) : null,
-      segments: indices(s.segments),
+      segments: linesFor(s.originalQuote, s.segments),
       clipStart: null,
       clipEnd: null,
     };
@@ -234,7 +261,7 @@ function normalise(r: Record<string, unknown>, ctx: { segmentCount: number; sour
     taughtBy: strOrNull(r.taughtBy),
     story: str(r.story),
     storyQuote: str(r.storyQuote),
-    storySegments: indices(r.storySegments),
+    storySegments: linesFor(r.storyQuote, r.storySegments),
     servings: /missing|unknown|not (mentioned|specified|given)|n\/a|^none$/i.test(servings) ? "" : servings,
     ingredients: ingredients.filter((i) => i.name || i.original),
     steps: steps.filter((s) => s.instruction),
