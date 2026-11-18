@@ -6,10 +6,10 @@ import { getJson, poll, postForAudio, postForm, postJson } from "@/lib/client/ap
 import { playBlob, Recorder, stopSpeaking, toWavChunks, watchVoice } from "@/lib/client/audio";
 import { decodeRecipe, recipeFromRecording } from "@/lib/client/pipeline";
 import { DEFAULT_SETTINGS, loadSettings, type Settings } from "@/lib/client/settings";
-import { newId, saveMedia, saveRecipe } from "@/lib/client/store";
+import { newId, saveRecipe, saveRecipeAndMedia } from "@/lib/client/store";
 import { canSpeak, LANGUAGES } from "@/lib/languages";
 import { formatClock } from "@/lib/recipe";
-import type { Turn } from "@/lib/types";
+import type { Recipe, Turn } from "@/lib/types";
 
 type Mode = "interview" | "upload" | "diary";
 
@@ -611,9 +611,8 @@ function Diary(p: Common) {
                     text,
                   });
                   const diaryImageId = file ? newId() : null;
-                  if (file && diaryImageId) await saveMedia(diaryImageId, file);
                   const id = newId();
-                  await saveRecipe({
+                  const recipe: Recipe = {
                     ...decoded,
                     id,
                     createdAt: Date.now(),
@@ -627,7 +626,9 @@ function Diary(p: Common) {
                     diaryImageId,
                     diaryText: text,
                     translations: {},
-                  });
+                  };
+                  if (file && diaryImageId) await saveRecipeAndMedia(recipe, diaryImageId, file);
+                  else await saveRecipe(recipe);
                   return id;
                 })
               }

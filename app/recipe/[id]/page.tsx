@@ -18,6 +18,7 @@ export default function RecipePage() {
   const [lang, setLang] = useState("en-IN");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [loadError, setLoadError] = useState("");
   const [katoriMl, setKatoriMl] = useState(150);
   const [mediaReady, setMediaReady] = useState(false);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
@@ -29,36 +30,60 @@ export default function RecipePage() {
     const s = loadSettings();
     setLang(s.learnerLanguage);
     setKatoriMl(s.katoriMl);
+    setRecipe(undefined);
+    setError("");
+    setLoadError("");
+    let cancelled = false;
     let urls: string[] = [];
-    getRecipe(id).then(async (r) => {
-      setRecipe(r ?? null);
-      if (!r) return;
-      if (r.mediaId) {
-        const blob = await getMedia(r.mediaId);
-        if (blob && r.mediaType?.startsWith("video")) {
-          const url = URL.createObjectURL(blob);
-          urls.push(url);
-          setVideoUrl(url);
-          setMediaReady(true);
-        } else if (blob) {
-          player.current = new ClipPlayer();
-          player.current
-            .load(blob)
-            .then(() => setMediaReady(true))
-            .catch(() => setError("This browser couldn't open the saved recording."));
+    setVideoUrl(null);
+    setDiaryUrl(null);
+    setMediaReady(false);
+    void (async () => {
+      try {
+        const r = await getRecipe(id);
+        if (cancelled) return;
+        setRecipe(r ?? null);
+        if (!r) return;
+        if (r.mediaId) {
+          const blob = await getMedia(r.mediaId);
+          if (cancelled) return;
+          if (blob && r.mediaType?.startsWith("video")) {
+            const url = URL.createObjectURL(blob);
+            urls.push(url);
+            setVideoUrl(url);
+            setMediaReady(true);
+          } else if (blob) {
+            player.current = new ClipPlayer();
+            player.current
+              .load(blob)
+              .then(() => {
+                if (!cancelled) setMediaReady(true);
+              })
+              .catch(() => {
+                if (!cancelled) setError("This browser couldn't open the saved recording.");
+              });
+          }
+        }
+        if (r.diaryImageId) {
+          const blob = await getMedia(r.diaryImageId);
+          if (cancelled) return;
+          if (blob?.type.startsWith("image")) {
+            const url = URL.createObjectURL(blob);
+            urls.push(url);
+            setDiaryUrl(url);
+          }
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setRecipe(null);
+          setLoadError(e instanceof Error ? e.message : String(e));
         }
       }
-      if (r.diaryImageId) {
-        const blob = await getMedia(r.diaryImageId);
-        if (blob?.type.startsWith("image")) {
-          const url = URL.createObjectURL(blob);
-          urls.push(url);
-          setDiaryUrl(url);
-        }
-      }
-    });
+    })();
     return () => {
+      cancelled = true;
       player.current?.close();
+      player.current = null;
       urls.forEach((u) => URL.revokeObjectURL(u));
       urls = [];
     };
@@ -98,21 +123,31 @@ export default function RecipePage() {
   async function setElderSpeaker(speaker: string) {
     if (!recipe) return;
     const updated = withClips({ ...recipe, elderSpeaker: speaker });
-    await saveRecipe(updated);
-    setRecipe(updated);
+    try {
+      await saveRecipe(updated);
+      setRecipe(updated);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
   }
 
   async function remove() {
     if (!recipe || !confirm(`Delete "${recipe.title}" and its recording from this device?`)) return;
-    await deleteRecipe(recipe);
-    router.push("/");
+    try {
+      await deleteRecipe(recipe);
+      router.push("/");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
   }
 
   if (recipe === undefined) return <p className="muted">Opening the recipe…</p>;
   if (recipe === null) {
     return (
       <div className="card center">
-        <p>This recipe isn&apos;t on this device. Recipes are saved in the browser where they were recorded.</p>
+        <p className={loadError ? "error" : undefined}>
+          {loadError || "This recipe isn&apos;t on this device. Recipes are saved in the browser where they were recorded."}
+        </p>
         <Link className="btn" href="/">
           Back to the cookbook
         </Link>

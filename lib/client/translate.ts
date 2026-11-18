@@ -14,7 +14,15 @@ export async function ensureTranslation(recipe: Recipe, language: string): Promi
     ...recipe.steps.flatMap((s) => [s.instruction, s.sensoryCue]),
     ...recipe.ingredients.map((i) => i.name),
   ];
-  const { texts: out } = await postJson<{ texts: string[] }>("/api/translate", { texts, source: "en-IN", target: language });
+  const response = await postJson<{ texts?: unknown }>("/api/translate", { texts, source: "en-IN", target: language });
+  if (
+    !Array.isArray(response.texts) ||
+    response.texts.length !== texts.length ||
+    response.texts.some((text) => typeof text !== "string")
+  ) {
+    throw new Error("The translation service returned an incomplete result. Please try again.");
+  }
+  const out = response.texts as string[];
 
   let k = 2;
   const translation: Translation = {

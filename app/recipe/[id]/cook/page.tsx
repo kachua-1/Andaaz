@@ -46,6 +46,7 @@ function Cook() {
   const [idx, setIdx] = useState(0);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
+  const [loadError, setLoadError] = useState("");
   const [listening, setListening] = useState(false);
   const [heard, setHeard] = useState("");
   const [answer, setAnswer] = useState<{ text: string; segment: number | null } | null>(null);
@@ -65,31 +66,64 @@ function Cook() {
 
   useEffect(() => {
     if (!search.get("lang")) setLang(loadSettings().learnerLanguage);
+    setRecipe(undefined);
+    setError("");
+    setLoadError("");
+    setStarted(false);
+    setFinished(false);
+    setIdx(0);
+    setTimer(null);
+    setStatus("");
+    setAnswer(null);
+    setHeard("");
+    setVideoUrl(null);
+    setMediaReady(false);
+    mediaReadyRef.current = false;
+    recipeRef.current = null;
+    let cancelled = false;
     let url: string | null = null;
-    getRecipe(id).then(async (r) => {
-      recipeRef.current = r ?? null;
-      setRecipe(r ?? null);
-      if (!r?.mediaId) return;
-      const blob = await getMedia(r.mediaId);
-      if (!blob) return;
-      const ready = () => {
-        mediaReadyRef.current = true;
-        setMediaReady(true);
-      };
-      if (r.mediaType?.startsWith("video")) {
-        url = URL.createObjectURL(blob);
-        setVideoUrl(url);
-        ready();
-      } else {
-        player.current = new ClipPlayer();
-        player.current.load(blob).then(ready, () => setError("This browser couldn't open the saved recording."));
+    void (async () => {
+      try {
+        const r = await getRecipe(id);
+        if (cancelled) return;
+        recipeRef.current = r ?? null;
+        setRecipe(r ?? null);
+        if (!r?.mediaId) return;
+        const blob = await getMedia(r.mediaId);
+        if (cancelled || !blob) return;
+        const ready = () => {
+          if (cancelled) return;
+          mediaReadyRef.current = true;
+          setMediaReady(true);
+        };
+        if (r.mediaType?.startsWith("video")) {
+          url = URL.createObjectURL(blob);
+          setVideoUrl(url);
+          ready();
+        } else {
+          player.current = new ClipPlayer();
+          player.current.load(blob).then(ready, () => {
+            if (!cancelled) setError("This browser couldn't open the saved recording.");
+          });
+        }
+      } catch (e) {
+        if (!cancelled) {
+          recipeRef.current = null;
+          setRecipe(null);
+          setLoadError(e instanceof Error ? e.message : String(e));
+        }
       }
-    });
+    })();
     return () => {
+      cancelled = true;
       runId.current++;
       player.current?.close();
+      player.current = null;
       stopSpeaking();
+      if (recorder.current) void recorder.current.stop();
+      recorder.current = null;
       stream.current?.getTracks().forEach((t) => t.stop());
+      stream.current = null;
       if (url) URL.revokeObjectURL(url);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -182,6 +216,10 @@ function Cook() {
   async function begin() {
     const r = recipeRef.current;
     if (!r) return;
+    if (!r.steps.length) {
+      setError("This recipe doesn't have any cooking steps yet.");
+      return;
+    }
     setError("");
     try {
       if (lang !== "en-IN" && !r.translations[lang]) {
@@ -209,6 +247,7 @@ function Cook() {
     runId.current++;
     stopAll();
     setFinished(true);
+    setTimer(null);
     setStatus("");
   }
 
@@ -310,7 +349,7 @@ function Cook() {
   if (recipe === null) {
     return (
       <div className="card center">
-        <p>This recipe isn&apos;t on this device.</p>
+        <p className={loadError ? "error" : undefined}>{loadError || "This recipe isn&apos;t on this device."}</p>
         <Link className="btn" href="/">
           Back to the cookbook
         </Link>

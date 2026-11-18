@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { DEFAULT_SETTINGS, KATORI_PHOTO_ID, loadSettings, saveSettings, type Settings } from "@/lib/client/settings";
 import { clearEverything, getMedia, newId, saveMedia, saveRecipe } from "@/lib/client/store";
 import { LANGUAGES } from "@/lib/languages";
@@ -12,10 +12,27 @@ export default function SettingsPage() {
   const [s, setS] = useState<Settings>(DEFAULT_SETTINGS);
   const [saved, setSaved] = useState(false);
   const [katoriUrl, setKatoriUrl] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const katoriUrlRef = useRef<string | null>(null);
 
   useEffect(() => {
     setS(loadSettings());
-    getMedia(KATORI_PHOTO_ID).then((b) => b && setKatoriUrl(URL.createObjectURL(b)));
+    let cancelled = false;
+    getMedia(KATORI_PHOTO_ID)
+      .then((b) => {
+        if (cancelled || !b) return;
+        const url = URL.createObjectURL(b);
+        katoriUrlRef.current = url;
+        setKatoriUrl(url);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      cancelled = true;
+      if (katoriUrlRef.current) URL.revokeObjectURL(katoriUrlRef.current);
+      katoriUrlRef.current = null;
+    };
   }, []);
 
   function update<K extends keyof Settings>(key: K, value: Settings[K]) {
@@ -25,8 +42,16 @@ export default function SettingsPage() {
 
   async function setKatoriPhoto(file: File | undefined) {
     if (!file) return;
-    await saveMedia(KATORI_PHOTO_ID, file);
-    setKatoriUrl(URL.createObjectURL(file));
+    try {
+      await saveMedia(KATORI_PHOTO_ID, file);
+      if (katoriUrlRef.current) URL.revokeObjectURL(katoriUrlRef.current);
+      const url = URL.createObjectURL(file);
+      katoriUrlRef.current = url;
+      setKatoriUrl(url);
+      setError("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
   }
 
   function save() {
@@ -35,22 +60,33 @@ export default function SettingsPage() {
   }
 
   async function addSample() {
-    const id = newId();
-    await saveRecipe(sampleRecipe(id));
-    router.push(`/recipe/${id}`);
+    try {
+      const id = newId();
+      await saveRecipe(sampleRecipe(id));
+      router.push(`/recipe/${id}`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
   }
 
   async function wipe() {
     if (!confirm("Delete every recipe and recording saved in this browser? This can't be undone.")) return;
-    await clearEverything();
-    setKatoriUrl(null);
-    router.push("/");
+    try {
+      await clearEverything();
+      if (katoriUrlRef.current) URL.revokeObjectURL(katoriUrlRef.current);
+      katoriUrlRef.current = null;
+      setKatoriUrl(null);
+      router.push("/");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
   }
 
   return (
     <div>
       <p className="eyebrow">Settings</p>
       <h1>Your family</h1>
+      {error && <p className="error">{error}</p>}
 
       <div className="card form-grid">
         <label className="field">

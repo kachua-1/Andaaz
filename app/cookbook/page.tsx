@@ -10,14 +10,33 @@ import type { Recipe } from "@/lib/types";
 export default function CookbookPage() {
   const [recipes, setRecipes] = useState<Recipe[] | null>(null);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
+  const [storageError, setStorageError] = useState("");
+
+  async function refreshRecipes() {
+    try {
+      setRecipes(await listRecipes());
+      setStorageError("");
+    } catch (e) {
+      setRecipes(null);
+      setStorageError(e instanceof Error ? e.message : String(e));
+    }
+  }
 
   useEffect(() => {
     setSettings(loadSettings());
-    listRecipes()
-      .then(setRecipes)
-      .catch(() => setRecipes([]));
+    void refreshRecipes();
   }, []);
 
+  if (storageError) {
+    return (
+      <div className="card center">
+        <p className="error">Couldn&apos;t open the cookbook: {storageError}</p>
+        <button className="btn" onClick={() => void refreshRecipes()}>
+          Try again
+        </button>
+      </div>
+    );
+  }
   if (recipes === null) return <p className="muted">Gathering the recipes…</p>;
   if (recipes.length === 0) {
     return (
