@@ -5,7 +5,7 @@ import { guessElderSpeaker, withClips } from "@/lib/recipe";
 import type { Recipe, Segment } from "@/lib/types";
 import { getJson, poll, postForm, postJson } from "./api";
 import { toWavChunks } from "./audio";
-import { newId, saveMedia, saveRecipe } from "./store";
+import { newId, saveRecipeAndMedia } from "./store";
 
 type Stage = (label: string) => void;
 
@@ -124,7 +124,6 @@ export async function recipeFromRecording(
   },
 ): Promise<string> {
   const mediaId = newId();
-  await saveMedia(mediaId, media);
 
   let segments: Segment[] = [];
   let language = opts.language;
@@ -167,6 +166,6 @@ export async function recipeFromRecording(
     diaryText: null,
     translations: {},
   });
-  await saveRecipe(recipe);
+  await saveRecipeAndMedia(recipe, mediaId, media);
   return recipe.id;
 }

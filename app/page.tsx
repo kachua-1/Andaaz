@@ -29,17 +29,30 @@ function festivalMonth(festival: string): number | null {
 export default function Home() {
   const [recipes, setRecipes] = useState<Recipe[] | null>(null);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
+  const [storageError, setStorageError] = useState("");
+
+  async function refreshRecipes() {
+    try {
+      setRecipes(await listRecipes());
+      setStorageError("");
+    } catch (e) {
+      setRecipes(null);
+      setStorageError(e instanceof Error ? e.message : String(e));
+    }
+  }
 
   useEffect(() => {
     setSettings(loadSettings());
-    listRecipes()
-      .then(setRecipes)
-      .catch(() => setRecipes([]));
+    void refreshRecipes();
   }, []);
 
   async function addSample() {
-    await saveRecipe(sampleRecipe(newId()));
-    setRecipes(await listRecipes());
+    try {
+      await saveRecipe(sampleRecipe(newId()));
+      await refreshRecipes();
+    } catch (e) {
+      setStorageError(e instanceof Error ? e.message : String(e));
+    }
   }
 
   const calendar = useMemo(() => {
@@ -95,7 +108,14 @@ export default function Home() {
             </Link>
           )}
         </div>
-        {recipes === null ? (
+        {storageError ? (
+          <div className="card center">
+            <p className="error">Couldn&apos;t open the cookbook: {storageError}</p>
+            <button className="btn" onClick={() => void refreshRecipes()}>
+              Try again
+            </button>
+          </div>
+        ) : recipes === null ? (
           <p className="muted">Opening the cookbook…</p>
         ) : recipes.length === 0 ? (
           <div className="card center">
